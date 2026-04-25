@@ -307,6 +307,7 @@
             transform-origin: center; z-index: 10;
             box-shadow: 0 4px 6px rgba(0,0,0,0.5), inset 0 -4px 6px rgba(0,0,0,0.4), inset 0 3px 6px rgba(255,255,255,0.6);
             border: 2px solid rgba(0,0,0,0.2);
+            display: none; /* Hidden by default until dynamic render */
         }
         
         .token[data-color="0"] { background: radial-gradient(circle at 30% 30%, #ff8a9f, var(--red) 60%, #990022); }
@@ -1146,6 +1147,21 @@
     // -----------------------------------------
     // ROOM CORE EXECUTION
     // -----------------------------------------
+    function initTokensDOM() {
+        const container = document.getElementById('tokens-container'); 
+        container.innerHTML = '';
+        for (let pIndex = 0; pIndex < 4; pIndex++) {
+            for (let tIndex = 0; tIndex < 4; tIndex++) {
+                let tEl = document.createElement('div'); 
+                tEl.className = 'token'; 
+                tEl.id = `token-${pIndex}-${tIndex}`;
+                tEl.dataset.color = pIndex;
+                tEl.style.display = 'none'; 
+                tEl.onclick = () => handleTokenClick(pIndex, tIndex);
+                container.appendChild(tEl);
+            }
+        }
+    }
 
     function executeJoinRoom(roomId) {
         initAudio();
@@ -1228,8 +1244,8 @@
             db.ref(`rooms/${currentRoomId}/signals/${myPlayerIndex}`).remove();
 
             createBoardDOM(); 
+            initTokensDOM(); // Create all hidden tokens upfront
             buildPlayerCards(safePlayers);
-            initTokensDOM(safePlayers); 
 
             db.ref('rooms/' + roomId).on('value', snap => { 
                 if (snap.val()) queueSync(snap.val()); 
@@ -1512,8 +1528,23 @@
 
         if (data.rollCount > localRollCount) { localRollCount = data.rollCount; await animateDice(data.diceValue); }
 
-        if (!visualPlayers) { visualPlayers = JSON.parse(JSON.stringify(players)); updateTokensDOM(); } 
-        else { await animateTokensTo(players); }
+        if (!visualPlayers) { 
+            visualPlayers = JSON.parse(JSON.stringify(players)); 
+            updateTokensDOM(); 
+        } else { 
+            // Sync new players to visualPlayers immediately before animating
+            players.forEach((p, i) => {
+                if (p && p.active && (p.userId || p.isRobot)) {
+                    if (!visualPlayers[i] || !visualPlayers[i].active) {
+                        visualPlayers[i] = JSON.parse(JSON.stringify(p));
+                    }
+                } else if (!p || !p.active) {
+                    if (visualPlayers[i]) visualPlayers[i].active = false;
+                }
+            });
+            updateTokensDOM(); // Ensure tokens exist in DOM
+            await animateTokensTo(players); 
+        }
 
         currentTurn = data.currentTurn || 0; GAME_STATE = data.gameState;
         diceValue = data.diceValue; consecutiveSixCount = data.consecutiveSixCount || 0;
@@ -1608,18 +1639,7 @@
             }
         }
     }
-    function initTokensDOM(initPlayers) {
-        const container = document.getElementById('tokens-container'); container.innerHTML = '';
-        for (let pIndex = 0; pIndex < 4; pIndex++) {
-            if(!initPlayers[pIndex] || !initPlayers[pIndex].active) continue;
-            for (let tIndex = 0; tIndex < 4; tIndex++) {
-                let tEl = document.createElement('div'); tEl.className = 'token'; tEl.id = `token-${pIndex}-${tIndex}`;
-                tEl.dataset.color = pIndex;
-                tEl.onclick = () => handleTokenClick(pIndex, tIndex);
-                container.appendChild(tEl);
-            }
-        }
-    }
+    
     function getLogicalCoordinates(pIndex, pos) {
         if (pos >= 0 && pos <= 50) return TRACK[(pos + START_OFFSETS[pIndex]) % 52];
         if (pos >= 51 && pos <= 55) return HOME_STRETCHES[pIndex][pos - 51];
@@ -1627,7 +1647,8 @@
     }
     
     function updateTokensDOM() {
-        if (!visualPlayers) return; let overlapMap = {};
+        if (!visualPlayers) return; 
+        let overlapMap = {};
         
         let currentMoves =[];
         if (GAME_STATE === 'WAITING_MOVE') {
@@ -1635,10 +1656,25 @@
         }
 
         for (let pIndex = 0; pIndex < 4; pIndex++) {
-            if (!visualPlayers[pIndex] || !visualPlayers[pIndex].active) continue;
+            let isActive = visualPlayers[pIndex] && visualPlayers[pIndex].active && (visualPlayers[pIndex].userId || visualPlayers[pIndex].isRobot);
+
             for (let tIndex = 0; tIndex < 4; tIndex++) {
-                let el = document.getElementById(`token-${pIndex}-${tIndex}`); if(!el) continue;
+                let el = document.getElementById(`token-${pIndex}-${tIndex}`); 
+                if(!el) {
+                    el = document.createElement('div');
+                    el.className = 'token';
+                    el.id = `token-${pIndex}-${tIndex}`;
+                    el.dataset.color = pIndex;
+                    el.onclick = () => handleTokenClick(pIndex, tIndex);
+                    document.getElementById('tokens-container').appendChild(el);
+                }
                 
+                if (!isActive) {
+                    el.style.display = 'none';
+                    continue;
+                }
+
+                el.style.display = 'block';
                 el.style.color = COLORS[pIndex];
 
                 if (pIndex === currentTurn && !isAnimatingTokens) {
@@ -1793,7 +1829,6 @@
             let miniContainer = document.getElementById(`mini-dice-container-${i}`);
             
             if (miniContainer) {
-                // FIXED: Keep dice visible for the entire turn
                 if (i === currentTurn && gameStarted && GAME_STATE !== 'GAME_OVER') {
                     miniContainer.classList.add('active');
                 } else {
@@ -1949,7 +1984,7 @@
         let newPlayers = JSON.parse(JSON.stringify(players));
         newPlayers.forEach(p => { if(p) p.tokens =[-1,-1,-1,-1]; });
         let nextTurn = getNextTurn(3, newPlayers,[]);
-        db.ref('rooms/' + currentRoomId).update({ players: newPlayers, gameState: 'WAITING_ROLL', currentTurn: nextTurn, consecutiveSixCount: 0, turnDeadline: Date.now() + serverTimeOffset + turnTimeLength, rollCount: localRollCount + 1, finishedPlayers: [], results:[] });
+        db.ref('rooms/' + currentRoomId).update({ players: newPlayers, gameState: 'WAITING_ROLL', currentTurn: nextTurn, consecutiveSixCount: 0, turnDeadline: Date.now() + serverTimeOffset + turnTimeLength, rollCount: localRollCount + 1, finishedPlayers:[], results:[] });
     }
 
     // -----------------------------------------
@@ -1989,7 +2024,6 @@
         
         container.appendChild(div); 
         
-        // FIXED: Limit chat to 5 messages
         while (container.children.length > 5) {
             container.removeChild(container.firstChild);
         }
@@ -2110,3 +2144,4 @@
 
 </body>
 </html>
+
